@@ -1,0 +1,5 @@
+#!/bin/bash
+# Warp Control for a locally built WarpOss.
+# Set WARP_SRC to your Warp checkout, or edit the default below.
+WARP_SRC="${WARP_SRC:-$HOME/code/warp}"
+exec -a warpctrl-oss "$WARP_SRC/target/debug/bundle/osx/WarpOss.app/Contents/MacOS/warp-oss" --warpctrl "$@"

@@ -1,0 +1,294 @@
+From 6488a251c2f1657fb1f50dd8da42ea7ed0aa4d2a Mon Sep 17 00:00:00 2001
+From: Nikolas Jack Altran <237433426+njaltran@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 16:18:38 +0200
+Subject: [PATCH 1/3] Add pane.read local-control action
+
+Adds a pane.read action and `warpctrl pane read [--lines N]` that returns a
+terminal pane's visible content. It reuses the terminal view's accessibility
+content, so it returns the alternate screen when a full-screen program is
+running and otherwise the recent blocks plus the input line.
+---
+ app/src/local_control/bridge.rs               |  3 ++
+ .../local_control/handlers/metadata_config.rs | 54 +++++++++++++++++--
+ app/src/local_control/resolver.rs             |  7 +--
+ crates/local_control/src/catalog.rs           |  3 ++
+ crates/local_control/src/protocol.rs          |  8 +++
+ crates/local_control/src/protocol_tests.rs    |  4 +-
+ crates/warp_cli/src/local_control/commands.rs | 13 +++--
+ crates/warp_cli/src/local_control/mod.rs      | 13 +++++
+ crates/warp_cli/src/local_control_tests.rs    |  5 ++
+ 9 files changed, 99 insertions(+), 11 deletions(-)
+
+diff --git a/app/src/local_control/bridge.rs b/app/src/local_control/bridge.rs
+index 3291c6c..4ed8744 100644
+--- a/app/src/local_control/bridge.rs
++++ b/app/src/local_control/bridge.rs
+@@ -155,6 +155,9 @@ impl LocalControlBridge {
+             ActionKind::PaneResetName => {
+                 metadata_config::pane_reset_name(&self.instance_id, &request.target, ctx)
+             }
++            ActionKind::PaneRead => {
++                metadata_config::pane_read(&self.instance_id, &request.target, &request.action, ctx)
++            }
+             ActionKind::SessionList => metadata::session_list(&request.target, ctx),
+             ActionKind::SessionInspect => metadata::session_inspect(&request.target, ctx),
+             ActionKind::ThemeList => settings_surfaces::theme_list(ctx),
+diff --git a/app/src/local_control/handlers/metadata_config.rs b/app/src/local_control/handlers/metadata_config.rs
+index fd8f14b..8e4b363 100644
+--- a/app/src/local_control/handlers/metadata_config.rs
++++ b/app/src/local_control/handlers/metadata_config.rs
+@@ -2,14 +2,14 @@
+ use std::str::FromStr as _;
+ 
+ use ::local_control::protocol::{
+-    BooleanValueParams, ColorValueParams, KeyParams, KeyValueParams, PaneTarget, RenameParams,
+-    TabTarget, TargetSelector, ThemeNameParams, WindowTarget,
++    BooleanValueParams, ColorValueParams, KeyParams, KeyValueParams, PaneReadParams, PaneTarget,
++    RenameParams, TabTarget, TargetSelector, ThemeNameParams, WindowTarget,
+ };
+ use ::local_control::{ActionKind, ControlError, ErrorCode, InstanceId};
+ use serde_json::json;
+ use settings::Setting as _;
+ use warp_core::ui::theme::AnsiColorIdentifier;
+-use warpui::{ModelContext, SingletonEntity as _, WindowId};
++use warpui::{ModelContext, SingletonEntity as _, View as _, WindowId};
+ 
+ use super::metadata::{
+     PaneEntry, TabEntry, WindowEntry, pane_entries_for_tabs, tab_entries_for_windows,
+@@ -130,6 +130,54 @@ pub(crate) fn pane_reset_name(
+     ))
+ }
+ 
++/// Reads the visible content of a terminal pane: the alternate screen when a
++/// full-screen program is running, otherwise the recent blocks and input. Reuses
++/// the terminal view's accessibility content so both cases match what screen
++/// readers see.
++pub(crate) fn pane_read(
++    instance_id: &Option<InstanceId>,
++    target: &TargetSelector,
++    action: &::local_control::Action,
++    ctx: &mut ModelContext<LocalControlBridge>,
++) -> Result<serde_json::Value, ControlError> {
++    let PaneReadParams { lines } = action.params_as()?;
++    let entry = select_single_pane_entry(target, ActionKind::PaneRead, ctx)?;
++    let terminal_view = entry
++        .pane_group
++        .read(ctx, |pane_group, ctx| {
++            pane_group.terminal_view_from_pane_id(entry.pane_id, ctx)
++        })
++        .ok_or_else(|| {
++            ControlError::new(
++                ErrorCode::MissingTarget,
++                "pane.read requires a terminal pane",
++            )
++        })?;
++    let content = terminal_view
++        .update(ctx, |terminal_view, ctx| {
++            terminal_view.accessibility_data(ctx)
++        })
++        .map(|data| data.content)
++        .unwrap_or_default();
++    let text = match lines {
++        Some(lines) => tail_lines(&content, lines as usize),
++        None => content,
++    };
++    Ok(json!({
++        "action": ActionKind::PaneRead.as_str(),
++        "ok": true,
++        "instance_id": instance_id.as_ref().map(|id| id.0.as_str()),
++        "tab_id": entry.tab_id,
++        "pane_id": entry.pane_id.to_string(),
++        "text": text,
++    }))
++}
++
++fn tail_lines(content: &str, lines: usize) -> String {
++    let all: Vec<&str> = content.trim_end().lines().collect();
++    all[all.len().saturating_sub(lines)..].join("\n")
++}
++
+ pub(crate) fn theme_set(
+     instance_id: &Option<InstanceId>,
+     action_kind: ActionKind,
+diff --git a/app/src/local_control/resolver.rs b/app/src/local_control/resolver.rs
+index 6a32baa..d18f4d5 100644
+--- a/app/src/local_control/resolver.rs
++++ b/app/src/local_control/resolver.rs
+@@ -2,9 +2,9 @@
+ use ::local_control::protocol::{
+     ActionNameParams, ActionParameterSpec, BindingNameParams, BooleanValueParams, ColorValueParams,
+     DirectionParams, EmptyParams, FileOpenParams, KeyParams, KeyValueParams, NamespaceParams,
+-    PageQueryParams, PaneTarget, QueryParams, RenameParams, ResizeParams, SessionTarget,
+-    TabActivateParams, TabCloseParams, TabCreateParams, TabTarget, TargetSelector, TextParams,
+-    ThemeNameParams, WindowTarget,
++    PageQueryParams, PaneReadParams, PaneTarget, QueryParams, RenameParams, ResizeParams,
++    SessionTarget, TabActivateParams, TabCloseParams, TabCreateParams, TabTarget, TargetSelector,
++    TextParams, ThemeNameParams, WindowTarget,
+ };
+ use ::local_control::{ActionKind, ControlError, ErrorCode, TargetScope};
+ use warpui::{AppContext, ModelContext, TypedActionView, ViewHandle, WindowId};
+@@ -43,6 +43,7 @@ pub(crate) fn validate_action_params(action: &::local_control::Action) -> Result
+         ActionParameterSpec::KeyValue => parse_params::<KeyValueParams>(action),
+         ActionParameterSpec::Namespace => parse_params::<NamespaceParams>(action),
+         ActionParameterSpec::PageQuery => parse_params::<PageQueryParams>(action),
++        ActionParameterSpec::PaneRead => parse_params::<PaneReadParams>(action),
+         ActionParameterSpec::Query => parse_params::<QueryParams>(action),
+         ActionParameterSpec::Rename => parse_params::<RenameParams>(action),
+         ActionParameterSpec::Resize => parse_params::<ResizeParams>(action),
+diff --git a/crates/local_control/src/catalog.rs b/crates/local_control/src/catalog.rs
+index c17b3cf..984ec5f 100644
+--- a/crates/local_control/src/catalog.rs
++++ b/crates/local_control/src/catalog.rs
+@@ -45,6 +45,7 @@ pub enum ActionParameterSpec {
+     KeyValue,
+     Namespace,
+     PageQuery,
++    PaneRead,
+     Query,
+     Rename,
+     Resize,
+@@ -68,6 +69,7 @@ pub enum ActionResultSpec {
+     InstanceMetadata,
+     KeybindingList,
+     KeybindingMetadata,
++    PaneContent,
+     SettingList,
+     SettingValue,
+     SurfaceList,
+@@ -215,6 +217,7 @@ define_action_catalog! {
+         PaneClose => { name: "pane.close", status: Implemented, target: Pane, params: None, result: Acknowledgement },
+         PaneRename => { name: "pane.rename", status: Implemented, target: Pane, params: Rename, result: Acknowledgement },
+         PaneResetName => { name: "pane.reset_name", status: Implemented, target: Pane, params: None, result: Acknowledgement },
++        PaneRead => { name: "pane.read", status: Implemented, target: Pane, params: PaneRead, result: PaneContent },
+     }
+ 
+     session {
+diff --git a/crates/local_control/src/protocol.rs b/crates/local_control/src/protocol.rs
+index 7ca54b7..fe55e97 100644
+--- a/crates/local_control/src/protocol.rs
++++ b/crates/local_control/src/protocol.rs
+@@ -138,6 +138,14 @@ pub struct QueryParams {
+     pub query: Option<String>,
+ }
+ 
++/// Parameters for `pane.read`. `lines` keeps only the last N lines of content.
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct PaneReadParams {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub lines: Option<u32>,
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub struct RenameParams {
+diff --git a/crates/local_control/src/protocol_tests.rs b/crates/local_control/src/protocol_tests.rs
+index 15e5516..15e103f 100644
+--- a/crates/local_control/src/protocol_tests.rs
++++ b/crates/local_control/src/protocol_tests.rs
+@@ -163,8 +163,8 @@ fn malformed_and_removed_action_names_are_not_deserialized() {
+ }
+ 
+ #[test]
+-fn catalog_has_exactly_84_retained_actions() {
+-    assert_eq!(ActionKind::ALL.len(), 84);
++fn catalog_has_exactly_85_retained_actions() {
++    assert_eq!(ActionKind::ALL.len(), 85);
+ }
+ 
+ #[test]
+diff --git a/crates/warp_cli/src/local_control/commands.rs b/crates/warp_cli/src/local_control/commands.rs
+index cc82eae..281ec0d 100644
+--- a/crates/warp_cli/src/local_control/commands.rs
++++ b/crates/warp_cli/src/local_control/commands.rs
+@@ -3,9 +3,9 @@ use local_control::discovery::InstanceRecord;
+ use local_control::protocol::{
+     Action, ActionKind, ActionNameParams, BindingNameParams, BooleanValueParams, ColorValueParams,
+     ControlError, DirectionParams, EmptyParams, ErrorCode, FileOpenParams, KeyParams,
+-    KeyValueParams, PageQueryParams, QueryParams, RenameParams, RequestEnvelope, ResizeParams,
+-    SettingListParams, TabActivateParams, TabActivationMode, TabCloseMode, TabCloseParams,
+-    TabCreateParams, TextParams, ThemeNameParams,
++    KeyValueParams, PageQueryParams, PaneReadParams, QueryParams, RenameParams, RequestEnvelope,
++    ResizeParams, SettingListParams, TabActivateParams, TabActivationMode, TabCloseMode,
++    TabCloseParams, TabCreateParams, TextParams, ThemeNameParams,
+ };
+ use local_control::selection::select_instance;
+ use serde::Serialize;
+@@ -157,6 +157,7 @@ fn render_human_readable(action: ActionKind, data: &serde_json::Value) -> String
+             "Split created pane {}",
+             nested_value_or_unknown(data, &["pane", "id"])
+         ),
++        ActionKind::PaneRead => value_or_unknown(data, "text"),
+         _ => serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string()),
+     }
+ }
+@@ -479,6 +480,12 @@ pub(super) fn run_pane_command(
+             output_format,
+         ),
+         PaneCommand::ResetName(args) => run_action(args, ActionKind::PaneResetName, output_format),
++        PaneCommand::Read(args) => run_action_with_params(
++            args.target,
++            ActionKind::PaneRead,
++            PaneReadParams { lines: args.lines },
++            output_format,
++        ),
+     }
+ }
+ 
+diff --git a/crates/warp_cli/src/local_control/mod.rs b/crates/warp_cli/src/local_control/mod.rs
+index ef0d88e..27a4d18 100644
+--- a/crates/warp_cli/src/local_control/mod.rs
++++ b/crates/warp_cli/src/local_control/mod.rs
+@@ -349,6 +349,9 @@ pub enum PaneCommand {
+ 
+     /// Reset a pane name.
+     ResetName(TargetArgs),
++
++    /// Read the visible content of a terminal pane.
++    Read(PaneReadArgs),
+ }
+ 
+ /// Commands that inspect local Warp sessions.
+@@ -684,6 +687,16 @@ pub struct PaneResizeArgs {
+     pub amount: Option<u32>,
+ }
+ 
++#[derive(Debug, Clone, Args)]
++pub struct PaneReadArgs {
++    #[command(flatten)]
++    pub target: TargetArgs,
++
++    /// Only return the last N lines.
++    #[arg(long = "lines")]
++    pub lines: Option<u32>,
++}
++
+ #[derive(Debug, Clone, Args)]
+ pub struct TextTargetArgs {
+     pub text: String,
+diff --git a/crates/warp_cli/src/local_control_tests.rs b/crates/warp_cli/src/local_control_tests.rs
+index c5305d3..9959cb5 100644
+--- a/crates/warp_cli/src/local_control_tests.rs
++++ b/crates/warp_cli/src/local_control_tests.rs
+@@ -402,6 +402,10 @@ fn retained_action_examples() -> Vec<(ActionKind, Vec<&'static str>)> {
+             ActionKind::PaneResetName,
+             vec!["warpctrl", "pane", "reset-name"],
+         ),
++        (
++            ActionKind::PaneRead,
++            vec!["warpctrl", "pane", "read", "--lines", "50"],
++        ),
+         (ActionKind::SessionList, vec!["warpctrl", "session", "list"]),
+         (
+             ActionKind::SessionInspect,
+@@ -637,6 +641,7 @@ fn parsed_action_kind(command: &ControlCommand) -> Option<ActionKind> {
+             PaneCommand::Close(_) => Some(ActionKind::PaneClose),
+             PaneCommand::Rename(_) => Some(ActionKind::PaneRename),
+             PaneCommand::ResetName(_) => Some(ActionKind::PaneResetName),
++            PaneCommand::Read(_) => Some(ActionKind::PaneRead),
+         },
+         ControlCommand::Session(command) => match command {
+             SessionCommand::List(_) => Some(ActionKind::SessionList),
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,183 @@
+From e041a59abcc581f2b47af1566988fa1d49c0702c Mon Sep 17 00:00:00 2001
+From: Nikolas Jack Altran <237433426+njaltran@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 17:06:18 +0200
+Subject: [PATCH 3/3] Add input.run local-control action
+
+Adds an input.run action and `warpctrl input run <text>` that executes a
+command in a terminal pane. It uses execute_command_or_set_pending, so a
+command sent to a pane whose shell is still bootstrapping is queued and runs
+once the shell is ready. Text is validated like input.insert/input.replace
+(no newlines or control characters).
+
+Upstream deliberately excluded input.run; this removes it from the excluded
+action and CLI route test lists. Local fork only.
+---
+ app/src/local_control/bridge.rs               |  1 +
+ app/src/local_control/handlers/app_state.rs   | 30 +++++++++++++++++++
+ crates/local_control/src/catalog.rs           |  1 +
+ crates/local_control/src/protocol_tests.rs    |  5 ++--
+ crates/warp_cli/src/local_control/commands.rs |  6 ++++
+ crates/warp_cli/src/local_control/mod.rs      |  3 ++
+ crates/warp_cli/src/local_control_tests.rs    |  6 +++-
+ 7 files changed, 48 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/local_control/bridge.rs b/app/src/local_control/bridge.rs
+index 4ed8744..f56ed2a 100644
+--- a/app/src/local_control/bridge.rs
++++ b/app/src/local_control/bridge.rs
+@@ -100,6 +100,7 @@ impl LocalControlBridge {
+             | ActionKind::SessionReopenClosed
+             | ActionKind::InputInsert
+             | ActionKind::InputReplace
++            | ActionKind::InputRun
+             | ActionKind::SurfaceSettingsOpen
+             | ActionKind::SurfaceCommandPaletteOpen
+             | ActionKind::SurfaceCommandSearchOpen
+diff --git a/app/src/local_control/handlers/app_state.rs b/app/src/local_control/handlers/app_state.rs
+index d607d61..707900e 100644
+--- a/app/src/local_control/handlers/app_state.rs
++++ b/app/src/local_control/handlers/app_state.rs
+@@ -109,6 +109,7 @@ pub(crate) fn handle(
+         ActionKind::SessionReopenClosed => session_reopen_closed(instance_id, target, ctx),
+         ActionKind::InputInsert => input_text(instance_id, action, params, target, false, ctx),
+         ActionKind::InputReplace => input_text(instance_id, action, params, target, true, ctx),
++        ActionKind::InputRun => input_run(instance_id, action, params, target, ctx),
+         ActionKind::SurfaceSettingsOpen => surface_settings_open(instance_id, params, target, ctx),
+         ActionKind::SurfaceCommandPaletteOpen => surface_palette_open(
+             instance_id,
+@@ -632,6 +633,35 @@ fn input_text(
+     Ok(ack(instance_id, action_kind))
+ }
+ 
++/// Runs `text` as a command in the target terminal. If the shell is not ready yet (e.g. a pane
++/// that was just split), the command is queued and runs once the shell finishes bootstrapping.
++fn input_run(
++    instance_id: &Option<InstanceId>,
++    action_kind: ActionKind,
++    params: &serde_json::Value,
++    target: &TargetSelector,
++    ctx: &mut ModelContext<LocalControlBridge>,
++) -> Result<serde_json::Value, ControlError> {
++    let text = text_param(params)?;
++    validate_staged_input_text(action_kind, &text)?;
++    let pane_group = target_pane_group(action_kind, target, ctx)?;
++    let pane_id = input_target_pane_id(action_kind, target, &pane_group, ctx)?;
++    let terminal_view = pane_group
++        .read(ctx, |pane_group, ctx| {
++            pane_group.terminal_view_from_pane_id(pane_id, ctx)
++        })
++        .ok_or_else(|| {
++            ControlError::new(
++                ErrorCode::MissingTarget,
++                format!("{} requires a terminal input target", action_kind.as_str()),
++            )
++        })?;
++    terminal_view.update(ctx, |terminal_view, ctx| {
++        terminal_view.execute_command_or_set_pending(&text, ctx);
++    });
++    Ok(ack(instance_id, action_kind))
++}
++
+ pub(super) fn validate_staged_input_text(
+     action: ActionKind,
+     text: &str,
+diff --git a/crates/local_control/src/catalog.rs b/crates/local_control/src/catalog.rs
+index 984ec5f..08c2c5f 100644
+--- a/crates/local_control/src/catalog.rs
++++ b/crates/local_control/src/catalog.rs
+@@ -232,6 +232,7 @@ define_action_catalog! {
+     input {
+         InputInsert => { name: "input.insert", status: Implemented, target: Input, params: Text, result: Acknowledgement },
+         InputReplace => { name: "input.replace", status: Implemented, target: Input, params: Text, result: Acknowledgement },
++        InputRun => { name: "input.run", status: Implemented, target: Input, params: Text, result: Acknowledgement },
+     }
+ 
+     theme {
+diff --git a/crates/local_control/src/protocol_tests.rs b/crates/local_control/src/protocol_tests.rs
+index 15e103f..a12e9c2 100644
+--- a/crates/local_control/src/protocol_tests.rs
++++ b/crates/local_control/src/protocol_tests.rs
+@@ -144,7 +144,6 @@ fn malformed_and_removed_action_names_are_not_deserialized() {
+         "input.get",
+         "input.clear",
+         "input.mode.set",
+-        "input.run",
+         "drive.list",
+         "drive.inspect",
+         "drive.open",
+@@ -163,8 +162,8 @@ fn malformed_and_removed_action_names_are_not_deserialized() {
+ }
+ 
+ #[test]
+-fn catalog_has_exactly_85_retained_actions() {
+-    assert_eq!(ActionKind::ALL.len(), 85);
++fn catalog_has_exactly_86_retained_actions() {
++    assert_eq!(ActionKind::ALL.len(), 86);
+ }
+ 
+ #[test]
+diff --git a/crates/warp_cli/src/local_control/commands.rs b/crates/warp_cli/src/local_control/commands.rs
+index 281ec0d..8283553 100644
+--- a/crates/warp_cli/src/local_control/commands.rs
++++ b/crates/warp_cli/src/local_control/commands.rs
+@@ -544,6 +544,12 @@ pub(super) fn run_input_command(
+             TextParams { text: args.text },
+             output_format,
+         ),
++        InputCommand::Run(args) => run_action_with_params(
++            args.target,
++            ActionKind::InputRun,
++            TextParams { text: args.text },
++            output_format,
++        ),
+     }
+ }
+ 
+diff --git a/crates/warp_cli/src/local_control/mod.rs b/crates/warp_cli/src/local_control/mod.rs
+index 27a4d18..fe31e67 100644
+--- a/crates/warp_cli/src/local_control/mod.rs
++++ b/crates/warp_cli/src/local_control/mod.rs
+@@ -383,6 +383,9 @@ pub enum InputCommand {
+ 
+     /// Replace the input buffer without submitting it.
+     Replace(TextTargetArgs),
++
++    /// Run a command in the terminal, queueing it if the shell is still starting.
++    Run(TextTargetArgs),
+ }
+ 
+ #[derive(Debug, Clone, Subcommand)]
+diff --git a/crates/warp_cli/src/local_control_tests.rs b/crates/warp_cli/src/local_control_tests.rs
+index 9959cb5..ee31893 100644
+--- a/crates/warp_cli/src/local_control_tests.rs
++++ b/crates/warp_cli/src/local_control_tests.rs
+@@ -90,7 +90,6 @@ fn rejects_excluded_command_routes() {
+         vec!["warpctrl", "input", "get"],
+         vec!["warpctrl", "input", "clear"],
+         vec!["warpctrl", "input", "mode", "set", "agent"],
+-        vec!["warpctrl", "input", "run", "pwd"],
+         vec!["warpctrl", "file", "list"],
+         vec!["warpctrl", "drive", "list"],
+         vec!["warpctrl", "auth", "status"],
+@@ -432,6 +431,10 @@ fn retained_action_examples() -> Vec<(ActionKind, Vec<&'static str>)> {
+             ActionKind::InputReplace,
+             vec!["warpctrl", "input", "replace", "hello"],
+         ),
++        (
++            ActionKind::InputRun,
++            vec!["warpctrl", "input", "run", "echo hello"],
++        ),
+         (ActionKind::ThemeList, vec!["warpctrl", "theme", "list"]),
+         (ActionKind::ThemeGet, vec!["warpctrl", "theme", "get"]),
+         (
+@@ -654,6 +657,7 @@ fn parsed_action_kind(command: &ControlCommand) -> Option<ActionKind> {
+         ControlCommand::Input(command) => match command {
+             InputCommand::Insert(_) => Some(ActionKind::InputInsert),
+             InputCommand::Replace(_) => Some(ActionKind::InputReplace),
++            InputCommand::Run(_) => Some(ActionKind::InputRun),
+         },
+         ControlCommand::Theme(command) => match command {
+             ThemeCommand::List(_) => Some(ActionKind::ThemeList),
+-- 
+2.54.0 (Apple Git-157)
+

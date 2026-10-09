@@ -1,0 +1,27 @@
+From 9eb7d2628e3482e9634afa78baa385ec7c686d42 Mon Sep 17 00:00:00 2001
+From: Nikolas Jack Altran <237433426+njaltran@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 16:18:38 +0200
+Subject: [PATCH 2/3] Enable WarpControlCli in OSS builds (local only)
+
+Local fork change so warpctrl-oss works in self-built OSS binaries. Not
+intended for upstream.
+---
+ app/src/bin/oss.rs | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/app/src/bin/oss.rs b/app/src/bin/oss.rs
+index e75edad..018f6af 100644
+--- a/app/src/bin/oss.rs
++++ b/app/src/bin/oss.rs
+@@ -21,6 +21,8 @@ fn main() -> Result<()> {
+             mcp_static_config: None,
+         },
+     );
++    // Local fork: enable Warp Control (warpctrl-oss) in OSS builds.
++    state = state.with_additional_features(&[warp_core::features::FeatureFlag::WarpControlCli]);
+     if cfg!(debug_assertions) {
+         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
+     }
+-- 
+2.54.0 (Apple Git-157)
+
