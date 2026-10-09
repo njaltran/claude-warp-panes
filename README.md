@@ -11,6 +11,12 @@ pane, though, and it isn't turned on in builds you compile yourself. This repo a
 those pieces as three small patches (~150 lines), plus a Claude Code skill that
 teaches Claude how to use them.
 
+![Splitting two panes, starting a server and a client in them, and reading both back](assets/demo.gif)
+
+*The commands the skill has Claude run (scripted here for the recording): split two
+panes, start a server in one and a client hitting it in the other, then read both
+panes back and report.*
+
 ```
 You:    start the dev server on the right and tell me when it's up
 Claude: warpctrl-oss pane split --direction right
