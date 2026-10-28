@@ -126,6 +126,11 @@ Start Claude Code **inside a WarpOss pane** and ask something like
 *"split a pane on the right and run the tests there"*. Claude picks up the skill
 on its own.
 
+Optional, but makes it much snappier: allow the CLI so Claude doesn't stop to ask
+before every call. Run `/permissions` in Claude Code and add `Bash(warpctrl-oss *)`.
+The skill also tells Claude to chain steps into a single call (e.g. split a pane
+and run a command in it at once) rather than making one tool call per step.
+
 ## Staying up to date with Warp
 
 Keep the patches as a branch on top of upstream and rebase now and then:
